@@ -98,8 +98,7 @@ class status_remove(delegate.page):
             raise web.unauthorized()
         i = web.input(prs=[])
         to_remove = {int(p) for p in i.prs}
-        state = _load_testing_state()
-        if state:
+        if state := _load_testing_state():
             state.prs = [p for p in state.prs if p.pr not in to_remove]
             _save_testing_state(state)
         raise web.seeother('/status')
@@ -295,7 +294,7 @@ class TestingPR:
             added_at=d.get('added_at', ''),
             added_by=d.get('added_by', ''),
             pull_latest_sha=d.get('pull_latest_sha', ''),
-            pending_active=d.get('pending_active', None),
+            pending_active=d.get('pending_active'),
         )
 
 

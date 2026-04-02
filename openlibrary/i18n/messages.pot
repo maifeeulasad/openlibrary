@@ -2442,11 +2442,19 @@ msgid "Testing Environment"
 msgstr ""
 
 #: status.html
-msgid "PR number or GitHub PR URL"
+msgid "Deploy triggered!"
 msgstr ""
 
 #: status.html
-msgid "Add PR"
+msgid "View Jenkins progress"
+msgstr ""
+
+#: status.html
+msgid "PR numbers or URLs, space/comma separated"
+msgstr ""
+
+#: status.html
+msgid "Add PR(s)"
 msgstr ""
 
 #: status.html
@@ -2476,11 +2484,15 @@ msgid "Active"
 msgstr ""
 
 #: status.html
-msgid "Pull to Latest"
+msgid "Fetch Latest"
 msgstr ""
 
 #: status.html
-msgid "Toggle Active"
+msgid "Enable"
+msgstr ""
+
+#: status.html
+msgid "Disable"
 msgstr ""
 
 #: lists/lists.html status.html type/list/edit.html type/series/edit.html
@@ -2488,7 +2500,7 @@ msgid "Remove"
 msgstr ""
 
 #: status.html
-msgid "Force Rebuild"
+msgid "Perform Deploy"
 msgstr ""
 
 #: status.html
@@ -2496,7 +2508,7 @@ msgid "No PRs in testing set."
 msgstr ""
 
 #: status.html
-msgid "Staged"
+msgid "Last Build Result"
 msgstr ""
 
 #: status.html
