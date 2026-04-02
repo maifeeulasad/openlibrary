@@ -1,4 +1,4 @@
-$def with (status = {}, flags = {}, dev_merged_status=None, testing_prs=None, drift_info=None, is_maintainer=False, show_testing=False)
+$def with (status = {}, flags = {}, dev_merged_status=None, testing_state=None, drift_info=None, is_maintainer=False, show_testing=False, deploy_triggered=False, jenkins_job_url='')
 $# Template entry point for /status page
 $var title: $_("Open Library server status")
 
@@ -26,8 +26,18 @@ $var title: $_("Open Library server status")
   .drift-high { background: #fff1f0; }
   .row-merged td { text-decoration: line-through; color: #999; }
   .row-inactive { opacity: 0.6; }
+  .row-new td { background: #e6f0ff; }
+  .row-pending-enable td { background: #f0fff4; }
+  .row-pending-disable td { background: #fff0f0; }
   .testing-actions { margin-top: 0.5em; }
   .testing-actions button { margin-right: 4px; }
+  .deploy-banner {
+    background: #e6ffe6;
+    border: 1px solid #5a5;
+    padding: 8px 12px;
+    margin-bottom: 1em;
+    border-radius: 4px;
+  }
 </style>
 
 <div id="contentHead">
@@ -39,13 +49,21 @@ $var title: $_("Open Library server status")
   $if show_testing:
     <h2>$_("Testing Environment")</h2>
 
+    $if deploy_triggered:
+      <div class="deploy-banner">
+        $_("Deploy triggered!")
+        $if jenkins_job_url:
+          &mdash; <a href="$jenkins_job_url" target="_blank">$_("View Jenkins progress")</a>
+      </div>
+
     $if is_maintainer:
       <form method="POST" action="/status/add" style="margin-bottom: 1em;">
         <input type="text" name="pr" placeholder="$_('PR numbers or URLs, space/comma separated')" size="50">
-        <button type="submit">$_("Add PR")</button>
+        <button type="submit">$_("Add PR(s)")</button>
       </form>
 
-    $if testing_prs:
+    $if testing_state and testing_state.prs:
+      $ last_deploy_at = testing_state.last_deploy_at
       <form method="POST" id="testing-form">
         <table class="testing-table">
           <thead>
@@ -62,18 +80,26 @@ $var title: $_("Open Library server status")
             </tr>
           </thead>
           <tbody>
-            $for pr in testing_prs:
+            $for pr in testing_state.prs:
               $ d = (drift_info or {}).get(pr.pr, {})
               $ drift = d.get('drift', -1)
               $ head_sha = d.get('head_sha', '')
               $ merged = d.get('merged', False)
-              $ row_class = ('row-merged ' if merged else '') + ('row-inactive ' if not pr.active else '') + ('drift-high' if drift > 5 else ('drift-low' if drift > 0 else ''))
+              $ is_new = bool(last_deploy_at and pr.added_at > last_deploy_at)
+              $ row_class = 'row-merged' if merged else ('row-pending-enable' if pr.pending_active is True else ('row-pending-disable' if pr.pending_active is False else ('row-new' if is_new else ('' if pr.active else 'row-inactive'))))
+              $ row_class += (' drift-high' if drift > 5 else (' drift-low' if drift > 0 else ''))
               <tr class="$row_class.strip()">
                 $if is_maintainer:
                   <td><input type="checkbox" name="prs" value="$pr.pr"></td>
                 <td><a href="https://github.com/internetarchive/openlibrary/pull/$pr.pr">#$pr.pr</a></td>
                 <td>$pr.title</td>
-                <td><a href="https://github.com/internetarchive/openlibrary/commit/$pr.commit">$pr.short_commit</a></td>
+                <td>
+                  $if pr.pull_latest_sha:
+                    <a href="https://github.com/internetarchive/openlibrary/commit/$pr.commit"><s>$pr.short_commit</s></a>
+                    &#x2191;&#x2191; <a href="https://github.com/internetarchive/openlibrary/commit/$pr.pull_latest_sha">$pr.short_pull_latest</a>
+                  $else:
+                    <a href="https://github.com/internetarchive/openlibrary/commit/$pr.commit">$pr.short_commit</a>
+                </td>
                 <td>$head_sha</td>
                 <td>
                   $if drift == 0:
@@ -84,7 +110,11 @@ $var title: $_("Open Library server status")
                     $drift commit$("s" if drift != 1 else "") behind
                 </td>
                 <td>
-                  $if pr.active:
+                  $if pr.pending_active is True:
+                    &#x23F8; &#x2192; &#x2705;
+                  $elif pr.pending_active is False:
+                    &#x2705; &#x2192; &#x23F8;
+                  $elif pr.active:
                     &#x2705;
                   $else:
                     &#x23F8;
@@ -96,22 +126,23 @@ $var title: $_("Open Library server status")
 
         $if is_maintainer:
           <div class="testing-actions">
-            <button formaction="/status/pull-latest" type="submit">$_("Pull to Latest")</button>
-            <button formaction="/status/toggle" type="submit">$_("Toggle Active")</button>
+            <button formaction="/status/pull-latest" type="submit">$_("Fetch Latest")</button>
+            <button formaction="/status/enable" type="submit">$_("Enable")</button>
+            <button formaction="/status/disable" type="submit">$_("Disable")</button>
             <button formaction="/status/remove" type="submit">$_("Remove")</button>
           </div>
       </form>
 
       $if is_maintainer:
-        <form method="POST" action="/status/rebuild" style="margin-top: 0.5em;">
-          <button type="submit">$_("Force Rebuild")</button>
+        <form method="POST" action="/status/deploy" style="margin-top: 0.5em;">
+          <button type="submit">$_("Perform Deploy")</button>
         </form>
 
     $else:
       <p>$_("No PRs in testing set.")</p>
 
   $if dev_merged_status:
-      <h2> $_("Staged") </h2>
+      <h2> $_("Last Build Result") </h2>
       <pre>$dev_merged_status.git_status</pre>
 
       <br>

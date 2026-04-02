@@ -7,7 +7,7 @@ import socket
 import sys
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -27,26 +27,30 @@ feature_flagso: dict[str, Any] = {}
 TESTING_STATE_FILE = Path('./_testing-prs.json')
 _GITHUB_API_BASE = "https://api.github.com/repos/internetarchive/openlibrary"
 _JENKINS_URL = "https://jenkins.openlibrary.org/job/testing-deploy/buildWithParameters"
+_JENKINS_JOB_URL = "https://jenkins.openlibrary.org/job/testing-deploy/"
 
 
 class status(delegate.page):
     def GET(self):
-        testing_prs = _load_testing_state()  # None if state file doesn't exist
+        testing_state = _load_testing_state()
         is_maintainer_user = _is_maintainer()
         drift_info = {}
-        if testing_prs:
+        if testing_state:
             # NOTE: makes 1-2 GitHub API calls per PR; acceptable for small testing sets
-            drift_info = {p.pr: _get_pr_drift(p) for p in testing_prs}
-        show_testing = testing_prs is not None or is_maintainer_user
+            drift_info = {p.pr: _get_pr_drift(p) for p in testing_state.prs}
+        show_testing = testing_state is not None or is_maintainer_user
+        i = web.input(deploy_triggered=None)
         return render_template(
             "status",
             status_info,
             feature_flags,
             dev_merged_status=get_dev_merged_status(),
-            testing_prs=testing_prs or [],
+            testing_state=testing_state,
             drift_info=drift_info,
             is_maintainer=is_maintainer_user,
             show_testing=show_testing,
+            deploy_triggered=bool(i.deploy_triggered),
+            jenkins_job_url=_JENKINS_JOB_URL,
         )
 
 
@@ -65,13 +69,13 @@ class status_add(delegate.page):
                     pr_numbers.append(_parse_pr_number(val))
         if not pr_numbers:
             raise web.badrequest()
-        prs = _load_testing_state() or []
-        existing = {p.pr for p in prs}
+        state = _load_testing_state() or TestingState(last_deploy_at='', prs=[])
+        existing = {p.pr for p in state.prs}
         user = get_current_user()
         for pr_number in pr_numbers:
             if pr_number not in existing:
                 info = _get_pr_info(pr_number)
-                prs.append(
+                state.prs.append(
                     TestingPR(
                         pr=pr_number,
                         commit=info['head_sha'],
@@ -82,8 +86,7 @@ class status_add(delegate.page):
                     )
                 )
                 existing.add(pr_number)
-        _save_testing_state(prs)
-        _trigger_rebuild()
+        _save_testing_state(state)
         raise web.seeother('/status')
 
 
@@ -95,27 +98,42 @@ class status_remove(delegate.page):
             raise web.unauthorized()
         i = web.input(prs=[])
         to_remove = {int(p) for p in i.prs}
-        _save_testing_state(
-            [p for p in (_load_testing_state() or []) if p.pr not in to_remove]
-        )
-        _trigger_rebuild()
+        state = _load_testing_state()
+        if state:
+            state.prs = [p for p in state.prs if p.pr not in to_remove]
+            _save_testing_state(state)
         raise web.seeother('/status')
 
 
-class status_toggle(delegate.page):
-    path = '/status/toggle'
+class status_enable(delegate.page):
+    path = '/status/enable'
 
     def POST(self):
         if not _is_maintainer():
             raise web.unauthorized()
         i = web.input(prs=[])
-        to_toggle = {int(p) for p in i.prs}
-        prs = _load_testing_state() or []
-        for p in prs:
-            if p.pr in to_toggle:
-                p.active = not p.active
-        _save_testing_state(prs)
-        _trigger_rebuild()
+        to_enable = {int(p) for p in i.prs}
+        state = _load_testing_state() or TestingState(last_deploy_at='', prs=[])
+        for p in state.prs:
+            if p.pr in to_enable:
+                p.pending_active = True
+        _save_testing_state(state)
+        raise web.seeother('/status')
+
+
+class status_disable(delegate.page):
+    path = '/status/disable'
+
+    def POST(self):
+        if not _is_maintainer():
+            raise web.unauthorized()
+        i = web.input(prs=[])
+        to_disable = {int(p) for p in i.prs}
+        state = _load_testing_state() or TestingState(last_deploy_at='', prs=[])
+        for p in state.prs:
+            if p.pr in to_disable:
+                p.pending_active = False
+        _save_testing_state(state)
         raise web.seeother('/status')
 
 
@@ -127,25 +145,35 @@ class status_pull_latest(delegate.page):
             raise web.unauthorized()
         i = web.input(prs=[])
         to_update = {int(p) for p in i.prs}
-        prs = _load_testing_state() or []
-        for p in prs:
+        state = _load_testing_state() or TestingState(last_deploy_at='', prs=[])
+        for p in state.prs:
             if p.pr in to_update:
                 info = _get_pr_info(p.pr)
-                if info['head_sha']:
-                    p.commit = info['head_sha']
-        _save_testing_state(prs)
-        _trigger_rebuild()
+                if info['head_sha'] and info['head_sha'] != p.commit:
+                    p.pull_latest_sha = info['head_sha']
+        _save_testing_state(state)
         raise web.seeother('/status')
 
 
-class status_rebuild(delegate.page):
-    path = '/status/rebuild'
+class status_deploy(delegate.page):
+    path = '/status/deploy'
 
     def POST(self):
         if not _is_maintainer():
             raise web.unauthorized()
+        state = _load_testing_state() or TestingState(last_deploy_at='', prs=[])
+        # Apply all pending changes before deploying
+        for p in state.prs:
+            if p.pull_latest_sha:
+                p.commit = p.pull_latest_sha
+                p.pull_latest_sha = ''
+            if p.pending_active is not None:
+                p.active = p.pending_active
+                p.pending_active = None
+        state.last_deploy_at = datetime.datetime.now(datetime.UTC).isoformat()
+        _save_testing_state(state)
         _trigger_rebuild()
-        raise web.seeother('/status')
+        raise web.seeother('/status?deploy_triggered=1')
 
 
 @functools.cache
@@ -227,17 +255,23 @@ class TestingPR:
     title: str
     added_at: str  # ISO timestamp
     added_by: str  # OL username
+    pull_latest_sha: str = ''  # pending SHA from "Pull to Latest"; applied on deploy
+    pending_active: bool | None = None  # pending enable/disable; applied on deploy
 
     @property
     def short_commit(self) -> str:
         return self.commit[:7]
 
     @property
+    def short_pull_latest(self) -> str:
+        return self.pull_latest_sha[:7] if self.pull_latest_sha else ''
+
+    @property
     def added_date(self) -> str:
         return self.added_at[:10] if self.added_at else ''
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             'pr': self.pr,
             'commit': self.commit,
             'active': self.active,
@@ -245,6 +279,11 @@ class TestingPR:
             'added_at': self.added_at,
             'added_by': self.added_by,
         }
+        if self.pull_latest_sha:
+            d['pull_latest_sha'] = self.pull_latest_sha
+        if self.pending_active is not None:
+            d['pending_active'] = self.pending_active
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> 'TestingPR':
@@ -255,20 +294,46 @@ class TestingPR:
             title=d.get('title', f"PR #{d['pr']}"),
             added_at=d.get('added_at', ''),
             added_by=d.get('added_by', ''),
+            pull_latest_sha=d.get('pull_latest_sha', ''),
+            pending_active=d.get('pending_active', None),
         )
 
 
-def _load_testing_state() -> 'list[TestingPR] | None':
-    """Returns list of TestingPRs if state file exists, None otherwise."""
+@dataclass
+class TestingState:
+    last_deploy_at: str  # ISO timestamp, empty if never deployed
+    prs: list[TestingPR] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            'last_deploy_at': self.last_deploy_at,
+            'prs': [p.to_dict() for p in self.prs],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> 'TestingState':
+        return cls(
+            last_deploy_at=d.get('last_deploy_at', ''),
+            prs=[TestingPR.from_dict(p) for p in d.get('prs', [])],
+        )
+
+
+def _load_testing_state() -> 'TestingState | None':
+    """Returns TestingState if state file exists, None otherwise."""
     if TESTING_STATE_FILE.exists():
-        return [
-            TestingPR.from_dict(d) for d in json.loads(TESTING_STATE_FILE.read_text())
-        ]
+        data = json.loads(TESTING_STATE_FILE.read_text())
+        if isinstance(data, list):
+            # Backward compat: old format was a bare array
+            return TestingState(
+                last_deploy_at='',
+                prs=[TestingPR.from_dict(d) for d in data],
+            )
+        return TestingState.from_dict(data)
     return None
 
 
-def _save_testing_state(prs: list[TestingPR]) -> None:
-    TESTING_STATE_FILE.write_text(json.dumps([p.to_dict() for p in prs], indent=2))
+def _save_testing_state(state: TestingState) -> None:
+    TESTING_STATE_FILE.write_text(json.dumps(state.to_dict(), indent=2))
     get_dev_merged_status.cache_clear()
 
 
@@ -329,7 +394,8 @@ def _trigger_rebuild() -> bool:
     token = getattr(config, 'jenkins_token', None)
     if not token:
         return False
-    prs = _load_testing_state() or []
+    state = _load_testing_state()
+    prs = state.prs if state else []
     lines = '\n'.join(f"origin pull/{p.pr}/head  # {p.title}" for p in prs if p.active)
     url = f"{_JENKINS_URL}?{urlencode({'token': token, 'GH_REPO_AND_BRANCH': lines})}"
     try:

@@ -35,19 +35,24 @@ pr_num, sha, title = int(sys.argv[1]), sys.argv[2], sys.argv[3]
 state_file = '_testing-prs.json'
 try:
     with open(state_file) as f:
-        prs = json.load(f)
+        data = json.load(f)
 except FileNotFoundError:
-    prs = []
+    data = {'last_deploy_at': '', 'prs': []}
+# Handle old array format
+if isinstance(data, list):
+    data = {'last_deploy_at': '', 'prs': data}
+prs = data['prs']
 existing = next((p for p in prs if p['pr'] == pr_num), None)
 if existing:
     existing['commit'] = sha  # bookmarklet = pull to latest
+    existing.pop('pull_latest_sha', None)
 else:
     prs.append({
         'pr': pr_num, 'commit': sha, 'active': True, 'title': title,
         'added_at': datetime.datetime.utcnow().isoformat(), 'added_by': 'bookmarklet',
     })
 with open(state_file, 'w') as f:
-    json.dump(prs, f, indent=2)
+    json.dump(data, f, indent=2)
 PYEOF
         fi
     done < "$BRANCHES_FILE"
@@ -72,7 +77,8 @@ if [[ -f "$TESTING_STATE_FILE" ]]; then
     done < <(python3 -c "
 import json
 with open('$TESTING_STATE_FILE') as f:
-    prs = json.load(f)
+    data = json.load(f)
+prs = data['prs'] if isinstance(data, dict) else data
 for p in prs:
     if p.get('active', True):
         print(p['pr'], p['commit'])
